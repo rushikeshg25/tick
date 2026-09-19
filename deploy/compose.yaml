@@ -1,0 +1,66 @@
+# A tick cluster small enough to reason about and real enough to break.
+#
+# One coordinator holds the node ID claims; three generators lease one each
+# and mint IDs continuously. Faults go to the generators and the coordinator;
+# the verifier stays out of the way so it can still see what happened.
+#
+#   docker compose -f deploy/compose.yaml up -d --wait
+#   monsoon run --compose deploy/compose.yaml deploy/tick-cluster.yaml
+#   docker compose -f deploy/compose.yaml run --rm verifier
+name: tick
+
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["coordinator", "-addr", ":8080"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/claims"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  gen1: &generator
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - generator
+      - -addr=:8080
+      - -coordinator=http://coordinator:8080
+      - -holder=gen1
+      - -rate=2000
+      - -ttl=15s
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  gen2:
+    <<: *generator
+    command:
+      - generator
+      - -addr=:8080
+      - -coordinator=http://coordinator:8080
+      - -holder=gen2
+      - -rate=2000
+      - -ttl=15s
+
+  gen3:
+    <<: *generator
+    command:
+      - generator
+      - -addr=:8080
+      - -coordinator=http://coordinator:8080
+      - -holder=gen3
+      - -rate=2000
+      - -ttl=15s
+
+  verifier:
+    <<: *generator
+    profiles: ["verify"]
+    command:
+      - verify
+      - -targets=http://gen1:8080,http://gen2:8080,http://gen3:8080
+      - -duration=3m
+      - -every=1s

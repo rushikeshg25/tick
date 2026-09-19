@@ -1,0 +1,60 @@
+# Monsoon scenario: everything that can go between a generator and its lease.
+#
+# Run against deploy/compose.yaml with the verifier attached. The pass
+# condition is that the verifier reports zero duplicates, whatever the
+# generators had to refuse along the way.
+#
+#   monsoon run --compose deploy/compose.yaml deploy/tick-cluster.yaml
+name: tick-cluster
+duration: 3m
+seed: 42
+
+events:
+  # A slow coordinator. Renewals still land, so nothing should stop.
+  - at: 10s
+    target: coordinator
+    fault:
+      type: latency
+      value: 400ms
+      duration: 20s
+
+  # Intermittent renewals. The lease survives on retries, which is the
+  # difference between a blip and an expiry.
+  - at: 40s
+    target: coordinator
+    fault:
+      type: packet-loss
+      value: 30%
+      duration: 20s
+
+  # gen1 is frozen. Its monotonic clock keeps running, so when it wakes it
+  # must discover the deadline has passed rather than trusting the lease it
+  # was holding when it went to sleep. This is the case naive lease logic
+  # gets wrong.
+  - at: 1m10s
+    target: gen1
+    fault:
+      type: pause
+      duration: 25s
+
+  # gen2 is cut off entirely for longer than the lease TTL. It must stop
+  # generating before the coordinator would let anyone else take node ID.
+  - at: 1m45s
+    target: gen2
+    fault:
+      type: disconnect
+      duration: 25s
+
+  # The coordinator restarts and loses every claim. Generators that cannot
+  # renew must stop; whoever re-acquires afterwards starts clean.
+  - at: 2m20s
+    target: coordinator
+    fault:
+      type: restart
+
+  # gen3 dies outright and comes back as a new process. Its node ID must not
+  # be reused until the old claim has expired.
+  - at: 2m35s
+    target: gen3
+    fault:
+      type: restart
