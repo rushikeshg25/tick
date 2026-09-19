@@ -1,4 +1,4 @@
-.PHONY: test race bench vet cover clean
+.PHONY: test race bench vet cover clean locality sim
 
 test:
 	go test ./...
@@ -18,3 +18,9 @@ cover:
 
 clean:
 	rm -rf bin coverage.txt coverage.html
+
+locality:
+	go test ./bench/ -v -run Locality
+
+sim:
+	go test ./sim/ -v -run TestSeedCorpus
