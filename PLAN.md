@@ -36,17 +36,31 @@ Rule that makes all of this testable: **nothing outside `clock.go` may call
 
 ## Milestones
 
-| # | Scope | Ships |
+| # | Scope | Status |
 |---|---|---|
-| M1 | Clock abstraction, Snowflake-64, lock-free generator, regression handling | A standalone, useful library |
-| M2 | UUIDv7 + ULID behind a shared interface | Drop-in for `uuid` columns |
-| M3 | Worker-ID allocators: static, k8s ordinal, etcd lease with fencing | Safe autoscaling |
-| M4 | Deterministic simulator with adversarial clocks | Proof, not assertion |
-| M5 | Index-locality benchmark against `bp-tree` / `mvccdb` | The headline chart |
-| M6 | `monsoon` scenario: real NTP skew on a real cluster | End-to-end validation |
+| M1 | Clock abstraction, Snowflake-64, lock-free generator, regression handling | done |
+| M2 | UUIDv7 + ULID behind a shared interface | done |
+| M3 | Worker-ID allocators: static, ordinal, lease with fencing | done |
+| M4 | Deterministic simulator with adversarial clocks | done |
+| M5 | Index-locality benchmark | done |
+| M6 | `monsoon` scenario against a real cluster | scenario validated; cluster not yet run |
 
-M1–M2 is a weekend. M3–M4 is where it becomes a real project. M5 is what makes
-it worth reading.
+Three things landed differently from the plan below, and the plan is left as
+written so the difference is visible.
+
+**The `Clock` interface needed a third method.** Waiting for the next
+millisecond cannot live in the generator, and a fake clock that never advances
+turns a busy-wait into a hang. `SleepUntil` is on the interface; see
+docs/PITFALLS.md.
+
+**No etcd `Store` ships.** Keeping the module dependency-free was worth more
+than vendoring an etcd client, so `worker.Store` is a three-method interface
+with an in-memory implementation for tests and an HTTP one for the cluster
+demo. docs/WORKER-IDS.md sketches the etcd version.
+
+**M5 measures against its own B+tree,** not `bp-tree` or `mvccdb`. Reaching
+across repositories would have coupled this module to two others; the model in
+`internal/btree` reproduces the mechanism that matters and stays in-tree.
 
 ---
 
