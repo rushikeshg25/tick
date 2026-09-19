@@ -1,6 +1,10 @@
 package tick
 
-import "math/rand/v2"
+import (
+	"errors"
+
+	"math/rand/v2"
+)
 
 // UUIDv7Generator issues RFC 9562 version 7 UUIDs.
 //
@@ -36,6 +40,9 @@ func NewUUIDv7Generator(opts ...Option) (*UUIDv7Generator, error) {
 	cfg, err := newConfig(opts)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.safe != nil {
+		return nil, errors.New("tick: WithLease does not apply to a format without a node id")
 	}
 	wm := newWatermark(cfg.clock, cfg.tol, SequenceBits)
 	if _, err := wm.timestamp(); err != nil {

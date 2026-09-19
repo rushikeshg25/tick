@@ -1,6 +1,7 @@
 package tick
 
 import (
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"time"
@@ -134,6 +135,9 @@ func NewULIDGenerator(opts ...Option) (*ULIDGenerator, error) {
 	cfg, err := newConfig(opts)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.safe != nil {
+		return nil, errors.New("tick: WithLease does not apply to a format without a node id")
 	}
 	wm := newWatermark(cfg.clock, cfg.tol, SequenceBits)
 	if _, err := wm.timestamp(); err != nil {

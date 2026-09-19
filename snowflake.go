@@ -1,8 +1,10 @@
 package tick
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,11 +26,17 @@ type Generator struct {
 	// node is the node ID pre-shifted into its final bit position, so the hot
 	// path is a single OR.
 	node uint64
+
+	// lost is set once the node ID's lease is gone. It is a plain atomic
+	// rather than a context check because the hot path cannot afford the
+	// mutex inside context.Context.Err.
+	lost atomic.Bool
 }
 
 type config struct {
 	clock Clock
 	tol   time.Duration
+	safe  context.Context
 }
 
 // Option configures a Generator.
@@ -45,6 +53,17 @@ func WithClock(c Clock) Option {
 // the cost of clustering more IDs into a single millisecond.
 func WithRegressionTolerance(d time.Duration) Option {
 	return func(cfg *config) { cfg.tol = d }
+}
+
+// WithLease binds a Generator to the safety context of a worker-ID lease, as
+// returned by worker.Lease.Safe. Once that context is cancelled the node ID
+// may belong to someone else, so every subsequent call returns ErrLeaseLost
+// and the generator never issues another ID.
+//
+// The option applies only to Generator. The UUID and ULID formats carry no
+// node ID, and their constructors reject it rather than ignore it.
+func WithLease(safe context.Context) Option {
+	return func(cfg *config) { cfg.safe = safe }
 }
 
 func newConfig(opts []Option) (config, error) {
@@ -80,7 +99,21 @@ func New(nodeID uint16, opts ...Option) (*Generator, error) {
 		return nil, err
 	}
 
-	return &Generator{wm: wm, node: uint64(nodeID) << nodeShift}, nil
+	g := &Generator{wm: wm, node: uint64(nodeID) << nodeShift}
+
+	if cfg.safe != nil {
+		if cfg.safe.Err() != nil {
+			return nil, fmt.Errorf("%w: lease was already over at construction", ErrLeaseLost)
+		}
+		// Watches for the rest of the lease's life. The goroutine ends when
+		// the lease does, which for a generator is process lifetime.
+		go func() {
+			<-cfg.safe.Done()
+			g.lost.Store(true)
+		}()
+	}
+
+	return g, nil
 }
 
 // NodeID returns the node this Generator issues IDs for.
@@ -90,6 +123,9 @@ func (g *Generator) NodeID() uint16 { return uint16(g.node >> nodeShift) }
 // sequence space is exhausted. It never waits longer than the regression
 // tolerance.
 func (g *Generator) Next() (ID, error) {
+	if g.lost.Load() {
+		return 0, ErrLeaseLost
+	}
 	ts, seq, err := g.wm.advance(true)
 	if err != nil {
 		return 0, err
@@ -100,6 +136,9 @@ func (g *Generator) Next() (ID, error) {
 // TryNext returns the next ID without waiting, reporting
 // ErrSequenceExhausted rather than blocking for the next millisecond.
 func (g *Generator) TryNext() (ID, error) {
+	if g.lost.Load() {
+		return 0, ErrLeaseLost
+	}
 	ts, seq, err := g.wm.advance(false)
 	if err != nil {
 		return 0, err
