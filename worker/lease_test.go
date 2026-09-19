@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,22 +15,33 @@ var origin = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 // leaseFixture wires a store, a clock, and a manual renewal trigger so tests
 // drive renewals explicitly rather than waiting on real time.
 type leaseFixture struct {
-	clock   *tick.FakeClock
-	store   *MemStore
-	trigger chan time.Time
+	clock *tick.FakeClock
+	store *MemStore
+
+	mu sync.Mutex
+	// One renewal channel per holder. Sharing one across holders lets
+	// whichever renew goroutine happens to be scheduled first consume the
+	// trigger meant for the other, which is a race in the fixture rather
+	// than in the code under test.
+	triggers map[string]chan time.Time
 }
 
 func newFixture(t *testing.T) *leaseFixture {
 	t.Helper()
 	clock := tick.NewFakeClock(origin)
 	return &leaseFixture{
-		clock:   clock,
-		store:   NewMemStore(clock),
-		trigger: make(chan time.Time, 1),
+		clock:    clock,
+		store:    NewMemStore(clock),
+		triggers: make(map[string]chan time.Time),
 	}
 }
 
 func (f *leaseFixture) config(holder string) Config {
+	ch := make(chan time.Time, 1)
+	f.mu.Lock()
+	f.triggers[holder] = ch
+	f.mu.Unlock()
+
 	return Config{
 		Store:         f.store,
 		Holder:        holder,
@@ -40,14 +52,22 @@ func (f *leaseFixture) config(holder string) Config {
 		SafetyMargin:  500 * time.Millisecond,
 		Range:         4,
 		Clock:         f.clock,
-		RenewSignal:   f.trigger,
+		RenewSignal:   ch,
 	}
 }
 
+// fire triggers one renewal cycle for a specific holder.
+func (f *leaseFixture) fire(holder string) {
+	f.mu.Lock()
+	ch := f.triggers[holder]
+	f.mu.Unlock()
+	ch <- time.Time{}
+}
+
 // renew fires one renewal cycle and waits for its effect to land.
-func (f *leaseFixture) renew(t *testing.T, l Lease) {
+func (f *leaseFixture) renew(t *testing.T, holder string, l Lease) {
 	t.Helper()
-	f.trigger <- time.Time{}
+	f.fire(holder)
 	waitFor(t, func() bool {
 		return l.Safe().Err() != nil || f.settled()
 	})
@@ -150,7 +170,7 @@ func TestSafeSurvivesSuccessfulRenewals(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		f.clock.Advance(time.Second)
-		f.renew(t, l)
+		f.renew(t, "a", l)
 		if err := l.Safe().Err(); err != nil {
 			t.Fatalf("lease lost after %d renewals: %v", i+1, err)
 		}
@@ -172,7 +192,7 @@ func TestSafeIsCancelledWhenAnotherHolderTakesOver(t *testing.T) {
 		t.Fatalf("Acquire by b: %v", err)
 	}
 
-	f.trigger <- time.Time{}
+	f.fire("a")
 	waitFor(t, func() bool { return l.Safe().Err() != nil })
 }
 
@@ -193,7 +213,7 @@ func TestSafeIsCancelledBeforeTheIDCanBeReacquired(t *testing.T) {
 	// let the renew loop notice. The usable window is TTL minus skew, round
 	// trip and margin: 10s - 500ms - 1s - 500ms = 8s.
 	f.clock.Advance(8 * time.Second)
-	f.trigger <- time.Time{}
+	f.fire("a")
 	waitFor(t, func() bool { return l.Safe().Err() != nil })
 
 	// At the moment the holder stopped, the store still considers the claim
@@ -224,14 +244,14 @@ func TestTransientStoreFailureDoesNotDropTheLease(t *testing.T) {
 	// that is the difference between a blip and an expiry.
 	f.store.Partition(true)
 	f.clock.Advance(time.Second)
-	f.renew(t, l)
+	f.renew(t, "a", l)
 	if err := l.Safe().Err(); err != nil {
 		t.Fatalf("lease dropped after a single transient failure: %v", err)
 	}
 
 	f.store.Partition(false)
 	f.clock.Advance(time.Second)
-	f.renew(t, l)
+	f.renew(t, "a", l)
 	if err := l.Safe().Err(); err != nil {
 		t.Fatalf("lease lost after recovery: %v", err)
 	}
