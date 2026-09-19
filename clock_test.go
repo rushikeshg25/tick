@@ -120,3 +120,70 @@ func TestSystemClockNowMillisTracksWallClock(t *testing.T) {
 		t.Errorf("NowMillis = %d, want within 50ms of %d", got, want)
 	}
 }
+
+func TestFakeClockSleepUntilAutoAdvances(t *testing.T) {
+	c := NewFakeClock(testStart)
+	target := testStart.Add(5 * time.Millisecond).UnixMilli()
+
+	c.SleepUntil(target)
+
+	if got := c.NowMillis(); got != target {
+		t.Errorf("NowMillis after SleepUntil = %d, want %d", got, target)
+	}
+	if got, want := c.Since(), 5*time.Millisecond; got != want {
+		t.Errorf("Since after SleepUntil = %v, want %v; auto-advance moves both readings", got, want)
+	}
+}
+
+func TestFakeClockSleepUntilPastIsNoOp(t *testing.T) {
+	c := NewFakeClock(testStart)
+	c.Advance(time.Second)
+	before := c.NowMillis()
+
+	c.SleepUntil(testStart.UnixMilli())
+
+	if got := c.NowMillis(); got != before {
+		t.Errorf("SleepUntil in the past moved the clock: %d -> %d", before, got)
+	}
+}
+
+func TestFakeClockSleepUntilBlocksWithoutAutoAdvance(t *testing.T) {
+	c := NewFakeClock(testStart)
+	c.SetAutoAdvance(false)
+
+	released := make(chan struct{})
+	go func() {
+		c.SleepUntil(testStart.Add(3 * time.Millisecond).UnixMilli())
+		close(released)
+	}()
+
+	select {
+	case <-released:
+		t.Fatal("SleepUntil returned before the clock reached its target")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	c.Advance(3 * time.Millisecond)
+
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("SleepUntil did not wake after the clock advanced past its target")
+	}
+}
+
+func TestSystemClockSleepUntilWaits(t *testing.T) {
+	c := NewSystemClock()
+	target := time.Now().Add(15 * time.Millisecond).UnixMilli()
+
+	start := time.Now()
+	c.SleepUntil(target)
+	elapsed := time.Since(start)
+
+	if time.Now().UnixMilli() < target {
+		t.Errorf("SleepUntil returned early: now=%d target=%d", time.Now().UnixMilli(), target)
+	}
+	if elapsed > time.Second {
+		t.Errorf("SleepUntil took %v, far longer than requested", elapsed)
+	}
+}

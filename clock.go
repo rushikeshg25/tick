@@ -21,6 +21,13 @@ type Clock interface {
 	// Since returns monotonic time elapsed since the Clock was created.
 	// It never moves backward.
 	Since() time.Duration
+
+	// SleepUntil blocks until NowMillis reports at least ms.
+	//
+	// Waiting lives on the Clock rather than in the generator so that the
+	// generator never calls into the time package, and so that a fake clock
+	// can satisfy the wait without a real one elapsing.
+	SleepUntil(ms int64)
 }
 
 // SystemClock reads the host clock. It is the only implementation in this
@@ -40,6 +47,25 @@ func NewSystemClock() *SystemClock {
 func (c *SystemClock) NowMillis() int64 { return time.Now().UnixMilli() }
 
 func (c *SystemClock) Since() time.Duration { return time.Since(c.origin) }
+
+// SleepUntil sleeps in bounded increments, re-reading the clock each time.
+// The bound matters: if the wall clock is stepped backward while we are
+// waiting, a single long sleep computed from the old reading would overshoot
+// by the size of the step.
+func (c *SystemClock) SleepUntil(ms int64) {
+	const maxSleep = 10 * time.Millisecond
+	for {
+		delta := ms - time.Now().UnixMilli()
+		if delta <= 0 {
+			return
+		}
+		d := time.Duration(delta) * time.Millisecond
+		if d > maxSleep {
+			d = maxSleep
+		}
+		time.Sleep(d)
+	}
+}
 
 // Drift reports how far the wall clock has diverged from what the monotonic
 // clock says it should read, measured since this Clock was created.
@@ -70,15 +96,49 @@ func (c *SystemClock) Drift() time.Duration {
 // A FakeClock is safe for concurrent use.
 type FakeClock struct {
 	mu     sync.Mutex
+	cond   *sync.Cond
 	origin time.Time // wall reading at construction, the drift baseline
 	wall   time.Time
 	mono   time.Duration
+	auto   bool
 }
 
 // NewFakeClock returns a FakeClock whose wall reading starts at start and
 // whose monotonic reading starts at zero.
+//
+// Auto-advance is on by default: SleepUntil jumps the clock to its target
+// rather than waiting for another goroutine. That keeps tests deterministic
+// and instant. Turn it off with SetAutoAdvance when a test needs to observe a
+// generator actually blocking.
 func NewFakeClock(start time.Time) *FakeClock {
-	return &FakeClock{origin: start, wall: start}
+	c := &FakeClock{origin: start, wall: start, auto: true}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
+
+// SetAutoAdvance controls how SleepUntil behaves. With auto-advance on, it
+// moves the clock to the requested instant and returns. With it off, it blocks
+// until another goroutine advances the clock past that instant.
+func (c *FakeClock) SetAutoAdvance(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.auto = on
+	c.cond.Broadcast()
+}
+
+// SleepUntil satisfies Clock. See SetAutoAdvance for the two behaviours.
+func (c *FakeClock) SleepUntil(ms int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.wall.UnixMilli() < ms {
+		if c.auto {
+			d := time.Duration(ms-c.wall.UnixMilli()) * time.Millisecond
+			c.wall = c.wall.Add(d)
+			c.mono += d
+			return
+		}
+		c.cond.Wait()
+	}
 }
 
 func (c *FakeClock) NowMillis() int64 {
@@ -103,6 +163,7 @@ func (c *FakeClock) Advance(d time.Duration) {
 	defer c.mu.Unlock()
 	c.wall = c.wall.Add(d)
 	c.mono += d
+	c.cond.Broadcast()
 }
 
 // Step moves only the wall reading by d, leaving monotonic time untouched.
@@ -113,6 +174,7 @@ func (c *FakeClock) Step(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.wall = c.wall.Add(d)
+	c.cond.Broadcast()
 }
 
 // Drift reports the divergence between the wall and monotonic readings,
