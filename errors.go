@@ -15,6 +15,12 @@ var (
 	// millisecond instead of returning this.
 	ErrSequenceExhausted = errors.New("tick: sequence exhausted for this millisecond")
 
+	// ErrTimestampOutOfRange is returned when the host clock falls outside the
+	// window the layout can represent: before Epoch, or beyond MaxTimestamp.
+	// The realistic cause is not the year 2095 but a machine whose clock was
+	// never set, which boots in 1970 and would otherwise mint negative IDs.
+	ErrTimestampOutOfRange = errors.New("tick: clock outside representable range")
+
 	// ErrNodeIDOutOfRange is returned by New when the node ID does not fit in
 	// NodeBits.
 	ErrNodeIDOutOfRange = errors.New("tick: node id out of range")
