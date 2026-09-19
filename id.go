@@ -1,6 +1,10 @@
 package tick
 
-import "time"
+import (
+	"fmt"
+	"strconv"
+	"time"
+)
 
 // Epoch is the origin of every timestamp embedded in a Snowflake-64 ID:
 // 2026-01-01T00:00:00Z, in milliseconds since the Unix epoch.
@@ -48,28 +52,30 @@ const (
 // The zero value is not a valid ID.
 type ID int64
 
+// compose folds the three fields into an ID. node must already be shifted
+// into its final bit position, which is how Generator stores it.
+func compose(ts, shiftedNode, seq uint64) ID {
+	return ID(ts<<timeShift | shiftedNode | seq)
+}
+
 // Time returns the instant the ID was generated, truncated to a millisecond.
 func (id ID) Time() time.Time {
-	// TODO(M1): reverse the layout above; remember to add Epoch back.
-	panic("tick: ID.Time not implemented")
+	return time.UnixMilli(int64(id)>>timeShift + Epoch).UTC()
 }
 
 // Node returns the node ID that generated this ID.
 func (id ID) Node() uint16 {
-	// TODO(M1)
-	panic("tick: ID.Node not implemented")
+	return uint16(int64(id) >> nodeShift & MaxNodeID)
 }
 
 // Seq returns the within-millisecond sequence number of this ID.
 func (id ID) Seq() uint16 {
-	// TODO(M1)
-	panic("tick: ID.Seq not implemented")
+	return uint16(int64(id) & MaxSequence)
 }
 
 // String returns the ID in base-10.
 func (id ID) String() string {
-	// TODO(M1)
-	panic("tick: ID.String not implemented")
+	return strconv.FormatInt(int64(id), 10)
 }
 
 // MarshalJSON encodes the ID as a JSON string rather than a number.
@@ -78,13 +84,30 @@ func (id ID) String() string {
 // lose precision when parsed by JavaScript, so an ID serialized as a bare
 // number can come back from a browser as a different ID, silently.
 func (id ID) MarshalJSON() ([]byte, error) {
-	// TODO(M1): quoted base-10. Pair with the round-trip test.
-	panic("tick: ID.MarshalJSON not implemented")
+	b := make([]byte, 0, 24)
+	b = append(b, '"')
+	b = strconv.AppendInt(b, int64(id), 10)
+	b = append(b, '"')
+	return b, nil
 }
 
 // UnmarshalJSON accepts the quoted form written by MarshalJSON, and also a
 // bare JSON number so that documents written by other tools still load.
 func (id *ID) UnmarshalJSON(data []byte) error {
-	// TODO(M1)
-	panic("tick: ID.UnmarshalJSON not implemented")
+	s := string(data)
+	if s == "null" {
+		return nil
+	}
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("tick: invalid ID %s: %w", data, err)
+	}
+	if v < 0 {
+		return fmt.Errorf("tick: invalid ID %s: negative", data)
+	}
+	*id = ID(v)
+	return nil
 }
